@@ -1,0 +1,174 @@
+name: Refresh catalog + deploy site
+
+# PUBLIC "runner" repo — it contains NO application source code.
+#
+# Every run checks out the private site repo (kazumuto/manhwas-digital-comics)
+# with the PRIVATE_REPO_TOKEN secret, scrapes fresh catalog data, commits the
+# snapshot, publishes the heavy statics to Cloudflare R2 and deploys the site
+# to Cloudflare Pages.
+#
+# WHY THIS REPO IS PUBLIC: public repositories get UNLIMITED free Actions
+# minutes, while private repos are capped (2,000/month on the free plan).
+# The 6-hourly scrape+deploy costs ~6,000 min/month, which silently
+# exhausted the private allowance in Sept 2026 and stopped every automation
+# (runs failed in ~4s with no logs). Here it is free forever. The private
+# repo keeps only the cheap jobs (daily health check, auto-update, deploys
+# on real code pushes) — a few hundred minutes/month.
+#
+# SECURITY: the token and Cloudflare credentials live in repo SECRETS
+# (encrypted, masked in logs). Nothing sensitive is in this repo's files —
+# the site source is checked out at runtime and never stored here.
+# NOTE: PRIVATE_REPO_TOKEN must be a classic token with `repo` scope (or a
+# fine-grained token with Contents read/write on the private repo). If it
+# ever expires, this workflow fails at checkout — generate a new one
+# (GitHub → Settings → Developer settings → Personal access tokens) and
+# update the PRIVATE_REPO_TOKEN secret.
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      autoRetry:
+        description: 'Set to "1" by the automatic re-dispatch below (bounds the retry loop to one extra run)'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: catalog-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the private site repo
+        uses: actions/checkout@v4
+        with:
+          repository: kazumuto/manhwas-digital-comics
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          # persist-credentials (default true) lets the commit step below
+          # git push with the same token. A PAT push also fires the private
+          # repo's on:push workflows — its Build check ignores catalog-only
+          # pushes (paths-ignore), so nothing redundant runs there; the
+          # deploy steps below are the deployment.
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        # full install (not --omit=dev): the build steps need devDependencies
+        run: npm ci
+
+      - name: Fetch live catalog from MangaDex
+        # NON-FATAL on purpose: MangaKatana is the PRIMARY content source,
+        # and a MangaDex bad window (Cloudflare-served 400 block pages that
+        # outlast the in-script backoff) must never block the sync. The
+        # script exits 1 on total failure with the previous snapshot left
+        # intact — the commit step then carries it forward unchanged.
+        continue-on-error: true
+        env:
+          # prefer the site's own proxy — GitHub runner IPs are often
+          # rate-limited by MangaDex; the script falls back to direct
+          # API calls automatically when the proxy is unreachable
+          MANGADEX_API: https://manhwas.site/api/md
+        run: node scripts/fetch-catalog.mjs
+
+      - name: Fetch MangaKatana catalog
+        # second content source — every manhwa + manhua on mangakatana.com
+        # (the script retries with backoff, adapts pacing when the source
+        # soft-throttles, and checkpoints progress so aborted runs resume)
+        run: node scripts/fetch-mangakatana.mjs
+
+      - name: Commit updated snapshot
+        run: |
+          set -e
+          git config user.name "catalog-bot"
+          git config user.email "actions@github.com"
+          git add public/catalog.json public/catalog-full.json public/catalog-mk.json
+          if git diff --cached --quiet; then
+            echo "No catalog changes — nothing to commit yet"
+          else
+            git commit -m "chore: auto-refresh catalog snapshot"
+          fi
+          # Rebase onto latest main (this run may have started from an older
+          # checkout). rebase REFUSES to run over ANY dirty file, so restore
+          # every unstaged change first — the sitemap is regenerated below
+          # with the post-rebase generator, so discarding the pre-rebase
+          # copy loses nothing.
+          git restore . || git checkout -- .
+          git fetch origin main
+          git rebase origin/main
+          # Regenerate the sitemap with the (possibly updated) generator,
+          # then fold it into the snapshot commit.
+          node scripts/generate-sitemap.mjs
+          git add public/sitemap.xml
+          if ! git diff --cached --quiet; then
+            if [ -n "$(git log --format=%H origin/main..HEAD)" ]; then
+              git commit --amend --no-edit
+            else
+              git commit -m "chore: regenerate sitemap"
+            fi
+          fi
+          git push origin HEAD:main
+
+      - name: Publish heavy static data to Cloudflare R2
+        # Runs AFTER the snapshot commit so an R2 hiccup can never block the
+        # catalog deploy. The script preflights the credentials and fails
+        # fast with fix instructions if the R2 token was rotated.
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: node scripts/upload-cdn.mjs
+
+      - name: Build the site (tsc + vite + prerender)
+        run: npm run build
+
+      - name: Remove catalog-mk.json (32MB — exceeds the Pages 25MB file limit)
+        # The client never fetches it in production: it reads the compact
+        # catalog-mk-meta.json from cdn.manhwas.site / same-origin.
+        run: rm dist/catalog-mk.json
+
+      - name: Publish chapter index to R2 (functions/read reads it)
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          node --input-type=module -e "
+          import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
+          import { readFileSync } from 'node:fs'
+          const s3 = new S3Client({ region: 'auto', endpoint: process.env.R2_ENDPOINT, credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY } })
+          await s3.send(new PutObjectCommand({ Bucket: 'manhwas-data', Key: 'read-data.json', Body: readFileSync('api/read-data.json'), ContentType: 'application/json' }))
+          console.log('read-data.json published to R2')
+          "
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # bindings + AUTH_SECRET come from wrangler.toml (R2 DATA bucket)
+          command: pages deploy dist --project-name=manhwas --branch=main --commit-dirty=true
+
+      # Self-healing: transient MangaDex/Cloudflare blocks can outlast the
+      # in-script backoff. Re-dispatch ONCE on failure; the re-dispatched
+      # run carries autoRetry="1" and never re-dispatches again.
+      - name: Re-dispatch once on failure
+        if: failure() && inputs.autoRetry != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/catalog-refresh.yml/dispatches" \
+            -d '{"ref":"main","inputs":{"autoRetry":"1"}}'
