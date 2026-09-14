@@ -86,6 +86,15 @@ jobs:
         # soft-throttles, and checkpoints progress so aborted runs resume)
         run: node scripts/fetch-mangakatana.mjs
 
+      - name: Enrich snapshots with real AniList popularity
+        # MangaKatana exposes no popularity numbers, so its scraper entries
+        # carry hash placeholders — without this step "Trending" is noise.
+        # Patches real AniList popularity/ratings into the snapshots by
+        # title match (nothing removed; unmatched entries keep placeholders;
+        # AniList outage = non-fatal pass-through).
+        continue-on-error: true
+        run: node scripts/enrich-popularity.mjs
+
       - name: Commit updated snapshot
         run: |
           set -e
