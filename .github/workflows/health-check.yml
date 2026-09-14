@@ -94,11 +94,11 @@ jobs:
                       count += 1
               page += 1
           print(f"Private repo Actions minutes used this month (approx): {total:.0f} across {count} runs (allowance: 2,000/month, free private plan)")
-          if total > 2000:
+          if total > 1900:
               # The month is already lost (nothing starts until the reset) —
               # warn in the log but don't turn every daily check red.
               print("::warning::Private-repo Actions minutes are exhausted for this month — scheduled private jobs fail to start until the monthly reset. Move more jobs into this public runner repo (unlimited minutes).")
-          elif total > 1700:
-              print("::error::Private-repo Actions minutes are ~85% exhausted. Trim schedules, or move more jobs into this (public, unlimited) runner repo — otherwise private automations stop starting at 2,000 minutes.")
+          elif total > 1600:
+              print("::error::Private-repo Actions minutes are ~80% exhausted. Trim schedules, or move more jobs into this (public, unlimited) runner repo — otherwise private automations stop starting at 2,000 minutes.")
               raise SystemExit(1)
           PY
