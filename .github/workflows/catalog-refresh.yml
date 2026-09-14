@@ -113,7 +113,18 @@ jobs:
           # copy loses nothing.
           git restore . || git checkout -- .
           git fetch origin main
-          git rebase origin/main
+          # -X theirs: on data conflicts the FRESH SCRAPE wins — the catalogs
+          # are machine-generated every run, so any divergent copy on
+          # origin/main (e.g. a manual data push that landed mid-scrape) is
+          # stale by definition. Code files never conflict here (this commit
+          # only touches catalog data + sitemap).
+          git rebase -X theirs origin/main || {
+            echo "rebase failed — resetting to origin/main, snapshot re-committed on top"
+            git rebase --abort || true
+            git reset --soft origin/main
+            git add public/catalog.json public/catalog-full.json public/catalog-mk.json
+            git commit -m "chore: auto-refresh catalog snapshot" || true
+          }
           # Regenerate the sitemap with the (possibly updated) generator,
           # then fold it into the snapshot commit.
           node scripts/generate-sitemap.mjs
