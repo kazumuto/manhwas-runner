@@ -159,6 +159,19 @@ jobs:
           # bindings + AUTH_SECRET come from wrangler.toml (R2 DATA bucket)
           command: pages deploy dist --project-name=manhwas --branch=main --commit-dirty=true
 
+      # IndexNow: notify participating search engines (Bing, Yandex, …) of
+      # new/changed URLs so fresh chapters get crawled within minutes instead
+      # of waiting for the next organic visit. The script runs in the site
+      # repo checkout above and diffs the committed snapshot against the
+      # previous one (HEAD~ when this run's commit step committed something,
+      # HEAD when it didn't — no commit means no changes, so nothing is
+      # pinged), then POSTs only the affected series + chapter URLs. Runs
+      # AFTER the deploy so every pinged URL is already live. Best-effort by
+      # design: IndexNow outages must never fail the pipeline.
+      - name: Ping IndexNow for new chapters
+        continue-on-error: true
+        run: node scripts/indexnow-urls.mjs
+
       # Self-healing: transient MangaDex/Cloudflare blocks can outlast the
       # in-script backoff. Re-dispatch ONCE on failure; the re-dispatched
       # run carries autoRetry="1" and never re-dispatches again.
