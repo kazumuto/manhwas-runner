@@ -1,0 +1,100 @@
+name: Daily health check
+
+# Daily production health verification, run from this PUBLIC repo so it
+# costs nothing (the private source repo's free 2,000-minutes/month
+# allowance is reserved for deploys on real code pushes). Checks out the
+# private site repo for the test suite at runtime.
+#
+# Checks: 40-check live SEO/functional suite (core pages, chapter URLs +
+# redirects, 404s, sitemap, robots.txt, ads, metadata), R2 CDN freshness
+# (catches rotated R2 tokens — the Sept 2026 freeze), and a monthly
+# Actions-minutes budget guard on the PRIVATE repo (its allowance can
+# still stop deploys if real pushes get heavy).
+
+on:
+  schedule:
+    - cron: '41 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the private site repo
+        uses: actions/checkout@v4
+        with:
+          repository: kazumuto/manhwas-digital-comics
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run the live SEO/functional suite
+        run: node scripts/seo-test.mjs --live
+
+      - name: R2 CDN freshness (catches rotated R2 tokens)
+        # The catalog refresh publishes the heavy statics to
+        # cdn.manhwas.site every 6 hours. If the R2 S3 token is ever
+        # rotated or deleted, those uploads fail with Unauthorized and the
+        # CDN silently freezes (it did exactly that for 2 days in Sept
+        # 2026). This check fails loudly once the data is > 30h old
+        # (5 missed refresh cycles) and points at the fix.
+        run: |
+          set -e
+          for f in catalog-full.json catalog-mk-meta.json; do
+            LM=$(curl -sI "https://cdn.manhwas.site/$f" | tr -d '\r' | awk 'BEGIN{IGNORECASE=1} /^last-modified:/{sub(/^[Ll]ast-[Mm]odified: */,""); print; exit}')
+            if [ -z "$LM" ]; then
+              echo "::error::cdn.manhwas.site/$f returned no Last-Modified header — is the CDN/bucket healthy?"
+              exit 1
+            fi
+            AGE_H=$(( ($(date +%s) - $(date -d "$LM" +%s)) / 3600 ))
+            echo "$f: uploaded ${AGE_H}h ago"
+            if [ "$AGE_H" -gt 30 ]; then
+              echo "::error::cdn.manhwas.site/$f is ${AGE_H}h old (>30h) — the catalog-refresh R2 publish has been failing. Open the latest 'Refresh catalog + deploy site' run: if uploads fail with Unauthorized, the R2 S3 token was rotated — generate a new one (Cloudflare → R2 → Manage API Tokens) and update the R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY secrets here."
+              exit 1
+            fi
+          done
+
+      - name: Private repo Actions-minutes budget guard
+        # The private source repo still runs deploys on code pushes,
+        # auto-update and manual jobs against its 2,000 free minutes/month.
+        # Sept 2026: usage silently hit the cap mid-month and EVERY private
+        # workflow stopped starting (runs failed in ~4s with no logs).
+        # Sum the month's private-repo run time and fail loudly at ~85%.
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          MONITORED_REPO: kazumuto/manhwas-digital-comics
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, datetime
+          token = os.environ["PRIVATE_REPO_TOKEN"]
+          repo = os.environ["MONITORED_REPO"]
+          total, count, page = 0.0, 0, 1
+          now = datetime.datetime.now(datetime.timezone.utc)
+          month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+          while page <= 6:
+              out = subprocess.check_output([
+                  "curl", "-s",
+                  "-H", f"Authorization: Bearer {token}",
+                  f"https://api.github.com/repos/{repo}/actions/runs?per_page=100&page={page}"])
+              runs = json.loads(out).get("workflow_runs", [])
+              if not runs:
+                  break
+              for r in runs:
+                  c = datetime.datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+                  if c < month_start:
+                      continue
+                  u = datetime.datetime.fromisoformat(r["updated_at"].replace("Z", "+00:00"))
+                  if r["status"] == "completed":
+                      total += (u - c).total_seconds() / 60.0
+                      count += 1
+              page += 1
+          print(f"Private repo Actions minutes used this month (approx): {total:.0f} across {count} runs (allowance: 2,000/month, free private plan)")
+          if total > 1700:
+              print("::error::Private-repo Actions minutes are ~85% exhausted. Trim schedules, or move more jobs into this (public, unlimited) runner repo — otherwise private automations stop starting at 2,000 minutes.")
+              raise SystemExit(1)
+          PY
