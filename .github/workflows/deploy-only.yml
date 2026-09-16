@@ -22,7 +22,7 @@ on:
   # to main is never stranded in the repo. Runs 3.5 h after the refresh
   # slot (23 */6 → :53 */6) so the two never race; deploys are idempotent.
   schedule:
-    - cron: '53 */6 * * *'
+    - cron: '53 */2 * * *'
 
 permissions:
   contents: read

@@ -9,8 +9,9 @@ name: Refresh catalog + deploy site
 #
 # WHY THIS REPO IS PUBLIC: public repositories get UNLIMITED free Actions
 # minutes, while private repos are capped (2,000/month on the free plan).
-# The 6-hourly scrape+deploy costs ~6,000 min/month, which silently
-# exhausted the private allowance in Sept 2026 and stopped every automation
+# The 2-hourly scrape+deploy runs here on unlimited public minutes — the
+# private repo's quota was silently exhausted in Sept 2026 (at a 6-hourly
+# cadence) and stopped every automation
 # (runs failed in ~4s with no logs). Here it is free forever. The private
 # repo keeps only the cheap jobs (daily health check, auto-update, deploys
 # on real code pushes) — a few hundred minutes/month.
@@ -26,7 +27,7 @@ name: Refresh catalog + deploy site
 
 on:
   schedule:
-    - cron: '23 */6 * * *'
+    - cron: '23 */2 * * *'
   workflow_dispatch:
     inputs:
       autoRetry:
