@@ -85,13 +85,21 @@ jobs:
         # (the script retries with backoff, adapts pacing when the source
         # soft-throttles, and checkpoints progress so aborted runs resume)
         #
-        # NON-FATAL on purpose (2026-09-16): mangakatana.com can be fully
-        # down (site-wide 504s) for hours. Without continue-on-error the
-        # failed scrape fails the JOB, which blocks the deploy at the end of
-        # this workflow — an upstream outage must never stop code fixes from
-        # shipping. The previous snapshot stays intact and is carried forward.
+        # NON-FATAL + PREFLIGHTED (2026-09-16): mangakatana.com can be fully
+        # down (site-wide 504s) for hours. Two guards make an outage
+        # harmless: (1) the preflight skips the scrape in seconds when the
+        # source doesn't answer, instead of burning the retry ladder across
+        # thousands of pages (which delayed the deploy at the end of this
+        # workflow by hours); (2) continue-on-error means even a genuine
+        # mid-run failure can't fail the job and block the deploy. The
+        # previous snapshot stays intact and is carried forward either way.
         continue-on-error: true
-        run: node scripts/fetch-mangakatana.mjs
+        run: |
+          if curl -sf -o /dev/null --max-time 20 https://mangakatana.com/; then
+            node scripts/fetch-mangakatana.mjs
+          else
+            echo "::warning::mangakatana.com unreachable — skipping the scrape; the previous snapshot is carried forward"
+          fi
 
       - name: Enrich snapshots with real AniList popularity
         # MangaKatana exposes no popularity numbers, so its scraper entries
