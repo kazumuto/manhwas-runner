@@ -1,0 +1,82 @@
+name: Deploy site (fast path)
+
+# Deploy-only workflow — checks out the private site repo at its current
+# main and ships it to Cloudflare Pages WITHOUT running the catalog scrapes.
+#
+# Why this exists (2026-09-16): the full catalog-refresh job ends with the
+# deploy, so ANY upstream scrape failure blocks the deploy. When
+# mangakatana.com went down site-wide (504s), the MangaKatana scrape step
+# failed every run and the site could not be deployed at all — even for
+# urgent code fixes already pushed to main. This workflow decouples the two:
+# run it (or let it run on demand) whenever a code fix must go live now.
+#
+# It still needs the private repo + Cloudflare credentials, which live in
+# this repo's secrets (nothing sensitive is stored here).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-fast
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the private site repo
+        uses: actions/checkout@v4
+        with:
+          repository: kazumuto/manhwas-digital-comics
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the site (tsc + vite + prerender)
+        run: npm run build
+
+      - name: Remove catalog-mk.json (32MB — exceeds the Pages 25MB file limit)
+        run: rm dist/catalog-mk.json
+
+      - name: Publish chapter index to R2 (functions/read reads it)
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          node --input-type=module -e "
+          import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
+          import { readFileSync } from 'node:fs'
+          const s3 = new S3Client({ region: 'auto', endpoint: process.env.R2_ENDPOINT, credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY } })
+          await s3.send(new PutObjectCommand({ Bucket: 'manhwas-data', Key: 'read-data.json', Body: readFileSync('api/read-data.json'), ContentType: 'application/json' }))
+          console.log('read-data.json published to R2')
+          "
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=manhwas --branch=main --commit-dirty=true
+
+      - name: Verify the deployment (functions layer + chapter renderer)
+        # The 2026-09-15 incident shipped a deployment WITHOUT the functions
+        # directory — every /api/* and /read/* request 404'd with the SPA
+        # shell. These two probes fail the run loudly if that recurs.
+        run: |
+          set -e
+          echo "— functions layer —"
+          curl -sf -o /dev/null -w '%{http_code} %{content_type}\n' "https://manhwas.site/api/md/manga?limit=1" | tee /tmp/md.txt
+          grep -q "application/json" /tmp/md.txt || { echo "::error::/api/md/manga did not return JSON — functions layer missing from the deployment"; exit 1; }
+          echo "— chapter renderer —"
+          curl -sf "https://manhwas.site/read/solo-leveling/chapter-1" | grep -q "Chapter 1" || { echo "::error::/read chapter document did not render"; exit 1; }
+          echo "deployment verified"
