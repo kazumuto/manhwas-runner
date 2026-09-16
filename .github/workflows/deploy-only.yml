@@ -15,6 +15,14 @@ name: Deploy site (fast path)
 
 on:
   workflow_dispatch:
+  # REDUNDANT SCHEDULED DEPLOY: GitHub's cron can drift or skip (observed
+  # 2026-09-16: the 6-hourly refresh did not fire at its slot), and the
+  # refresh job only deploys if it gets that far. This job ships whatever
+  # main currently is — including without a scrape — so a code fix merged
+  # to main is never stranded in the repo. Runs 3.5 h after the refresh
+  # slot (23 */6 → :53 */6) so the two never race; deploys are idempotent.
+  schedule:
+    - cron: '53 */6 * * *'
 
 permissions:
   contents: read

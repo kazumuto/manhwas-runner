@@ -164,6 +164,23 @@ jobs:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: node scripts/upload-cdn.mjs
 
+      - name: Warm the manifest archive on R2
+        # Readers try cdn.manhwas.site/<src>-pages/… BEFORE hitting the
+        # Functions (R2 reads cost no invocation against the 100k/day
+        # budget). This pre-warms the most-read chapters' manifests
+        # straight from the source with the runner's S3 credentials — no
+        # Function invocations at all. Best-effort: a warm-up failure must
+        # never affect the deploy below.
+        continue-on-error: true
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          WARM_SERIES: '120'
+          WARM_CHAPTERS: '8'
+        run: node scripts/warm-manifest-archive.mjs
+
       - name: Build the site (tsc + vite + prerender)
         run: npm run build
 
