@@ -15,3 +15,20 @@ for the full story.
 - Runs: scrape MangaDex + MangaKatana → commit snapshot → publish to
   Cloudflare R2 → build + deploy to Cloudflare Pages
 - Self-heals: re-dispatches once on transient failure
+
+Additional workflows:
+
+- `deploy-only.yml` — ships current main to Cloudflare Pages without
+  scraping (2-hourly offset + on demand for urgent fixes)
+- `health-check.yml` — daily live suite + R2/CDN freshness tripwire
+- `publish-mirror.yml` — **disaster-recovery mirror**: builds the site and
+  force-pushes the static output to `kazumuto/manhwas` `gh-pages`, served at
+  https://mirror.manhwas.site (GitHub Pages; DNS-only CNAME in the
+  manhwas.site Cloudflare zone). Every 3h at :38 (8 builds/day, under the
+  Pages 10/day cap) + `workflow_dispatch` for immediate republish during an
+  incident. Covers the full SEO surface (all prerendered pages, catalogs,
+  sitemaps, robots, llms.txt); chapter reading (`/read/*`) and `/api/*`
+  stay Cloudflare-only. Why: a copyright complaint can suspend the
+  Cloudflare zone/Pages project — the mirror keeps the site reachable on a
+  different provider with its own DMCA process. Runbook:
+  migration_context.md §19.3 in the private repo.
