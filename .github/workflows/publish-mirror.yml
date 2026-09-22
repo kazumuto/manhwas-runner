@@ -1,0 +1,100 @@
+name: Publish static mirror (GitHub Pages)
+
+# Disaster-recovery mirror: republishes the site's static build to the
+# kazumuto/manhwas gh-pages branch, served at https://mirror.manhwas.site
+# (CNAME record in the manhwas.site Cloudflare zone, DNS-only → kazumuto.github.io).
+#
+# WHY (2026-09-22): manhwas.site = Cloudflare (Pages + DNS). A copyright
+# complaint can suspend the CF zone/Pages project with no API access to the
+# abuse queue. The mirror lives on GitHub Pages — different company, its own
+# DMCA process (public github/github DMCA archive), free static hosting that
+# does not meter this site's read traffic.
+#
+# WHAT THE MIRROR IS: the prerendered static dist/ (all 4,005 SEO pages,
+# catalogs, sitemaps, robots, llms.txt, mk-chapters). SPA routes render
+# client-side from the shipped HTML/JS. NOT mirrored: /api/* and /read/*
+# Pages Functions (the mirror's /read/* returns the prerendered chapter
+# shell — see dist/read/<slug>/chapter-N.html? — no, /read is functions-only
+# on Cloudflare, so the mirror's chapter URLs 404; the mirror is for
+# browsing/catalog/series pages and as a last-resort read index).
+#
+# CADENCE: every 3h at :38 (offset from catalog-refresh :15 and deploy-only
+# :53) → 8 builds/day, under GitHub Pages' 10 builds/day free cap.
+# workflow_dispatch allows an immediate republish during an incident.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '38 */3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the private site repo
+        uses: actions/checkout@v4
+        with:
+          repository: kazumuto/manhwas-digital-comics
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the site (tsc + vite + prerender)
+        run: npm run build
+
+      # catalog-mk.json is 32MB — over GitHub Pages' 100MB-per-file limit is
+      # fine, but it bloats the gh-pages repo (mirror serves the compact
+      # catalog-mk-meta.json + per-series files, same as production).
+      - name: Prepare dist for Pages
+        run: |
+          set -e
+          rm -f dist/catalog-mk.json
+          echo "mirror.manhwas.site" > dist/CNAME
+          touch dist/.nojekyll
+          # Pages-served marker so we can verify which host is answering.
+          echo "mirror" > dist/_mirror-marker.txt
+          du -sh dist
+
+      - name: Publish to kazumuto/manhwas gh-pages
+        env:
+          MIRROR_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -e
+          cd dist
+          git init -q -b gh-pages
+          git config user.name "mirror-bot"
+          git config user.email "kazutoo5133@gmail.com"
+          git add -A
+          git commit -q -m "Mirror refresh $(date -u +%Y-%m-%dT%H:%MZ)"
+          git remote add origin "https://x-access-token:${MIRROR_TOKEN}@github.com/kazumuto/manhwas.git"
+          git push -q --force origin gh-pages
+
+      - name: Verify the mirror is live
+        run: |
+          set -e
+          sleep 90
+          for i in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' https://mirror.manhwas.site/ || true)
+            marker=$(curl -s https://mirror.manhwas.site/_mirror-marker.txt || true)
+            if [ "$code" = "200" ] && [ "$marker" = "mirror" ]; then
+              echo "mirror verified: / -> 200, marker ok"
+              curl -s -o /dev/null -w 'series page: %{http_code}\n' https://mirror.manhwas.site/manhwa/solo-leveling
+              exit 0
+            fi
+            echo "attempt $i: / -> ${code:-none}, marker '${marker:-none}' — Pages build may still be deploying"
+            sleep 60
+          done
+          echo "::warning::mirror not verified yet — Pages builds can lag a few minutes; check https://github.com/kazumuto/manhwas/deployments"
