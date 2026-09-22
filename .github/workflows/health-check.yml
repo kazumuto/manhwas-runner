@@ -59,6 +59,26 @@ jobs:
             fi
           done
 
+      - name: Disaster-recovery mirror alive (mirror.manhwas.site)
+        # The GitHub Pages mirror is the takedown-resilience layer
+        # (migration_context.md §19). If it silently breaks, nobody notices
+        # until the day it is actually needed — so check it daily: marker
+        # file 200 (proves the gh-pages publish, not a generic page) and one
+        # prerendered series page.
+        run: |
+          set -e
+          marker=$(curl -s https://mirror.manhwas.site/_mirror-marker.txt || true)
+          if [ "$marker" != "mirror" ]; then
+            echo "::error::mirror.manhwas.site marker check failed (got '${marker:-nothing}') — the GitHub Pages mirror is stale or broken. Re-run 'Publish static mirror (GitHub Pages)' in this repo and check https://github.com/kazumuto/manhwas/deployments and the gh-pages branch."
+            exit 1
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' https://mirror.manhwas.site/manhwa/solo-leveling || true)
+          echo "mirror marker ok, series page -> $code"
+          if [ "$code" != "200" ]; then
+            echo "::error::mirror series page returned $code — gh-pages content is incomplete. Re-run the publish-mirror workflow."
+            exit 1
+          fi
+
       - name: Private repo Actions-minutes budget guard
         # The private source repo still runs deploys on code pushes,
         # auto-update and manual jobs against its 2,000 free minutes/month.
