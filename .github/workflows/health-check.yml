@@ -36,6 +36,17 @@ jobs:
       - name: Run the live SEO/functional suite
         run: node scripts/seo-test.mjs --live
 
+      - name: Newest-chapter audit (every series)
+        # §31: walks EVERY MangaKatana series in the shipped catalog and
+        # verifies the newest chapter resolves at all four layers — SSR read
+        # index, /read SSR page, per-series /mk-chapters file, /api/mk page
+        # extractor. Covers future series automatically as the catalog
+        # grows. Low concurrency: MK throttles bursts (429) and the point
+        # is truth, not speed. Budget 25: MK upstream flake produces a
+        # handful of transient layer-3 failures even with backoff; anything
+        # systemic (an index/build/renderer regression) blows far past it.
+        run: node scripts/chapter-audit.mjs --live --conc 4 --max-fail 25
+
       - name: R2 CDN freshness (catches rotated R2 tokens)
         # The catalog refresh publishes the heavy statics to
         # cdn.manhwas.site every 6 hours. If the R2 S3 token is ever
