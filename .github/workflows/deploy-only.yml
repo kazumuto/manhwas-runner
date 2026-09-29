@@ -58,6 +58,8 @@ jobs:
         run: npm run build
 
       - name: Upload sourcemaps to PostHog (Error Tracking, §34.1)
+        # Analytics tooling must never block a site deploy.
+        continue-on-error: true
         # Inert until the repo secrets POSTHOG_CLI_TOKEN (phx_ personal key,
         # error-tracking write + org read scopes) and POSTHOG_PROJECT_ID are
         # added — see migration_context.md §34.1. Runs only here (deploy-only),
