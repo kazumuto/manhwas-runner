@@ -183,6 +183,10 @@ jobs:
         run: node scripts/warm-manifest-archive.mjs
 
       - name: Build the site (tsc + vite + prerender)
+        env:
+          # PostHog web analytics (§34) — same vars as deploy-only.yml
+          VITE_POSTHOG_KEY: phc_CQbm8uLNpNV9f9FwANs9wSjhMdJjnqnyycpCBxcd5DEM
+          VITE_POSTHOG_HOST: https://us.i.posthog.com
         run: npm run build
 
       - name: Remove catalog-mk.json (32MB — exceeds the Pages 25MB file limit)
