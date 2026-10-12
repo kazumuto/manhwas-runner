@@ -105,11 +105,20 @@ jobs:
         # The 2026-09-15 incident shipped a deployment WITHOUT the functions
         # directory — every /api/* and /read/* request 404'd with the SPA
         # shell. These two probes fail the run loudly if that recurs.
+        # 2026-10-12: probe the custom domain first, fall back to
+        # manhwas.pages.dev so a registrar-level parking (expired domain,
+        # DNS away from Cloudflare) can't turn a healthy deploy red — the
+        # Pages deployment itself is what this workflow ships.
         run: |
           set -e
-          echo "— functions layer —"
-          curl -sf -o /dev/null -w '%{http_code} %{content_type}\n' "https://manhwas.site/api/md/manga?limit=1" | tee /tmp/md.txt
+          BASE="https://manhwas.site"
+          if ! curl -sf -m 15 -o /dev/null "$BASE/api/md/manga?limit=1"; then
+            echo "::warning::custom domain probe failed (domain may be parked) — verifying against manhwas.pages.dev"
+            BASE="https://manhwas.pages.dev"
+          fi
+          echo "— functions layer ($BASE) —"
+          curl -sf -m 30 -o /dev/null -w '%{http_code} %{content_type}\n' "$BASE/api/md/manga?limit=1" | tee /tmp/md.txt
           grep -q "application/json" /tmp/md.txt || { echo "::error::/api/md/manga did not return JSON — functions layer missing from the deployment"; exit 1; }
           echo "— chapter renderer —"
-          curl -sf "https://manhwas.site/read/solo-leveling/chapter-1" | grep -q "Chapter 1" || { echo "::error::/read chapter document did not render"; exit 1; }
-          echo "deployment verified"
+          curl -sf -m 30 "$BASE/read/solo-leveling/chapter-1" | grep -q "Chapter 1" || { echo "::error::/read chapter document did not render"; exit 1; }
+          echo "deployment verified ($BASE)"
