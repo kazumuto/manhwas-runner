@@ -32,6 +32,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        # seo-test.mjs imports typescript; chapter-audit + R2 fallback need
+        # node_modules too. Health-check previously skipped npm ci entirely.
+        run: npm ci
 
       - name: Resolve live base (custom domain or pages.dev fallback)
         # 2026-10-12: manhwas.site is registrar-parked (expired domain, DNS
@@ -97,7 +103,6 @@ jobs:
             done
           else
             echo "::warning::cdn.manhwas.site unreachable (domain parked) — checking R2 bucket directly"
-            npm ls @aws-sdk/client-s3 >/dev/null 2>&1 || npm i --no-save @aws-sdk/client-s3 >/dev/null 2>&1
             node --input-type=module -e "
             import { S3Client, HeadObjectCommand } from '@aws-sdk/client-s3';
             const s3 = new S3Client({ region: 'auto', endpoint: process.env.R2_ENDPOINT, credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY } });
