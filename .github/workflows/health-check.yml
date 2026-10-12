@@ -33,8 +33,21 @@ jobs:
         with:
           node-version: 22
 
+      - name: Resolve live base (custom domain or pages.dev fallback)
+        # 2026-10-12: manhwas.site is registrar-parked (expired domain, DNS
+        # away from Cloudflare) so custom-host probes fail while the actual
+        # Pages deployment is healthy. Resolve once; later steps use $BASE.
+        id: base
+        run: |
+          if curl -sf -m 15 -o /dev/null "https://manhwas.site/api/md/manga?limit=1"; then
+            echo "base=https://manhwas.site" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::manhwas.site unreachable (likely parked) — health-checking https://manhwas.pages.dev"
+            echo "base=https://manhwas.pages.dev" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run the live SEO/functional suite
-        run: node scripts/seo-test.mjs --live
+        run: node scripts/seo-test.mjs --live ${{ steps.base.outputs.base }}
 
       - name: Newest-chapter audit (every series)
         # §31: walks EVERY MangaKatana series in the shipped catalog and
@@ -49,30 +62,53 @@ jobs:
         # the client fallback chain covers them at view time). Index/SSR/
         # chapters-file layers must stay at ZERO — anything systemic blows
         # far past this budget.
-        run: node scripts/chapter-audit.mjs --live --conc 4 --max-fail 40
+        run: node scripts/chapter-audit.mjs --live --base ${{ steps.base.outputs.base }} --conc 4 --max-fail 40
 
-      - name: R2 CDN freshness (catches rotated R2 tokens)
+      - name: R2 CDN freshness (catches rotated R2 tokens, parking-aware)
         # The catalog refresh publishes the heavy statics to
         # cdn.manhwas.site every 6 hours. If the R2 S3 token is ever
         # rotated or deleted, those uploads fail with Unauthorized and the
         # CDN silently freezes (it did exactly that for 2 days in Sept
         # 2026). This check fails loudly once the data is > 30h old
         # (5 missed refresh cycles) and points at the fix.
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           set -e
-          for f in catalog-full.json catalog-mk-meta.json; do
-            LM=$(curl -sI "https://cdn.manhwas.site/$f" | tr -d '\r' | awk 'BEGIN{IGNORECASE=1} /^last-modified:/{sub(/^[Ll]ast-[Mm]odified: */,""); print; exit}')
-            if [ -z "$LM" ]; then
-              echo "::error::cdn.manhwas.site/$f returned no Last-Modified header — is the CDN/bucket healthy?"
-              exit 1
-            fi
-            AGE_H=$(( ($(date +%s) - $(date -d "$LM" +%s)) / 3600 ))
-            echo "$f: uploaded ${AGE_H}h ago"
-            if [ "$AGE_H" -gt 30 ]; then
-              echo "::error::cdn.manhwas.site/$f is ${AGE_H}h old (>30h) — the catalog-refresh R2 publish has been failing. Open the latest 'Refresh catalog + deploy site' run: if uploads fail with Unauthorized, the R2 S3 token was rotated — generate a new one (Cloudflare → R2 → Manage API Tokens) and update the R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY secrets here."
-              exit 1
-            fi
-          done
+          # Prefer the CDN hostname; when the domain is parked it never
+          # answers, so fall back to a direct R2 S3 HEAD (needs the R2
+          # secrets above — same creds the catalog refresh publishes with).
+          if curl -sf -m 15 -o /dev/null "https://cdn.manhwas.site/catalog-full.json"; then
+            for f in catalog-full.json catalog-mk-meta.json; do
+              LM=$(curl -sI "https://cdn.manhwas.site/$f" | tr -d '\r' | awk 'BEGIN{IGNORECASE=1} /^last-modified:/{sub(/^[Ll]ast-[Mm]odified: */,""); print; exit}')
+              if [ -z "$LM" ]; then
+                echo "::error::cdn.manhwas.site/$f returned no Last-Modified header — is the CDN/bucket healthy?"
+                exit 1
+              fi
+              AGE_H=$(( ($(date +%s) - $(date -d "$LM" +%s)) / 3600 ))
+              echo "$f: uploaded ${AGE_H}h ago"
+              if [ "$AGE_H" -gt 30 ]; then
+                echo "::error::cdn.manhwas.site/$f is ${AGE_H}h old (>30h) — the catalog-refresh R2 publish has been failing. Open the latest 'Refresh catalog + deploy site' run: if uploads fail with Unauthorized, the R2 S3 token was rotated — generate a new one (Cloudflare → R2 → Manage API Tokens) and update the R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY secrets here."
+                exit 1
+              fi
+            done
+          else
+            echo "::warning::cdn.manhwas.site unreachable (domain parked) — checking R2 bucket directly"
+            npm ls @aws-sdk/client-s3 >/dev/null 2>&1 || npm i --no-save @aws-sdk/client-s3 >/dev/null 2>&1
+            node --input-type=module -e "
+            import { S3Client, HeadObjectCommand } from '@aws-sdk/client-s3';
+            const s3 = new S3Client({ region: 'auto', endpoint: process.env.R2_ENDPOINT, credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY } });
+            const bucket = process.env.R2_BUCKET || 'manhwas-cdn';
+            for (const f of ['catalog-full.json','catalog-mk-meta.json']) {
+              const h = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: f }));
+              const ageH = (Date.now() - h.LastModified.getTime()) / 36e5;
+              console.log(f + ': uploaded ' + ageH.toFixed(1) + 'h ago (direct R2)');
+              if (ageH > 30) { console.error('::error::' + f + ' is stale — R2 publish failing'); process.exit(1); }
+            }"
+          fi
 
       - name: Disaster-recovery mirror alive (mirror.manhwas.site)
         # The GitHub Pages mirror is the takedown-resilience layer
@@ -82,6 +118,22 @@ jobs:
         # prerendered series page.
         run: |
           set -e
+          # While mirror.manhwas.site is registrar-parked, its HTTP never
+          # answers (and the apex CNAME makes the github.io path 301 back
+          # to the parked host). Fall back to verifying the gh-pages branch
+          # directly via the API when HTTP is unreachable.
+          if ! curl -sf -m 15 -o /dev/null https://mirror.manhwas.site/_mirror-marker.txt; then
+            echo "::warning::mirror.manhwas.site unreachable (domain parked) — verifying gh-pages branch via API"
+            code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/kazumuto/manhwas/contents/_mirror-marker.txt?ref=gh-pages" || true)
+            body=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/kazumuto/manhwas/contents/_mirror-marker.txt?ref=gh-pages" || true)
+            if [ "$code" = "200" ] && echo "$body" | grep -q '"name"'; then
+              echo "mirror gh-pages branch alive via API — skipping HTTP probes while parked"
+              exit 0
+            else
+              echo "::error::mirror gh-pages branch check failed (API $code) — republish via 'Publish static mirror (GitHub Pages)'."
+              exit 1
+            fi
+          fi
           marker=$(curl -s https://mirror.manhwas.site/_mirror-marker.txt || true)
           if [ "$marker" != "mirror" ]; then
             echo "::error::mirror.manhwas.site marker check failed (got '${marker:-nothing}') — the GitHub Pages mirror is stale or broken. Re-run 'Publish static mirror (GitHub Pages)' in this repo and check https://github.com/kazumuto/manhwas/deployments and the gh-pages branch."
