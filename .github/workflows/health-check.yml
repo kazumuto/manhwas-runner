@@ -140,6 +140,10 @@ jobs:
           fi
 
       - name: Disaster-recovery mirror alive (mirror.manhwas.site)
+        env:
+          # GITHUB_TOKEN only sees this repo; the mirror lives in
+          # kazumuto/manhwas, so the API fallback needs the cross-repo PAT.
+          MIRROR_API_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         # The GitHub Pages mirror is the takedown-resilience layer
         # (migration_context.md §19). If it silently breaks, nobody notices
         # until the day it is actually needed — so check it daily: marker
@@ -153,8 +157,8 @@ jobs:
           # directly via the API when HTTP is unreachable.
           if ! curl -sf -m 15 -o /dev/null https://mirror.manhwas.site/_mirror-marker.txt; then
             echo "::warning::mirror.manhwas.site unreachable (domain parked) — verifying gh-pages branch via API"
-            code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/kazumuto/manhwas/contents/_mirror-marker.txt?ref=gh-pages" || true)
-            body=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/kazumuto/manhwas/contents/_mirror-marker.txt?ref=gh-pages" || true)
+            code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $MIRROR_API_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/kazumuto/manhwas/contents/_mirror-marker.txt?ref=gh-pages" || true)
+            body=$(curl -s -H "Authorization: Bearer $MIRROR_API_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/kazumuto/manhwas/contents/_mirror-marker.txt?ref=gh-pages" || true)
             if [ "$code" = "200" ] && echo "$body" | grep -q '"name"'; then
               echo "mirror gh-pages branch alive via API — skipping HTTP probes while parked"
               exit 0
